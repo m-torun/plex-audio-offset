@@ -34,11 +34,28 @@ the rest, anything unfamiliar about the command line, and any error, ends in
 the real transcoder being started with exactly the arguments Plex gave. With
 the service stopped, every start is passed through.
 
-The shift happens in the transcoder, ahead of where the player is. Left alone,
-Plex transcodes a minute or more ahead, so a change would take that long to be
-heard. The service therefore keeps the transcoder about 20 s ahead, and about
-5 s ahead while the page is open, so that a change is heard a few seconds after
-it is made.
+### Why a change is not instant
+
+A change can only alter audio the server has not sent yet, and the player
+already holds some seconds of the stream. You hear the change when playback
+reaches the first audio that was made after it. Two things keep that short:
+
+- **Pacing.** Left alone, Plex's transcoder is soon minutes ahead of the
+  player, and a change would take that long to be heard. The service keeps it
+  about 20 s ahead, and about 5 s ahead while the page is open. The page
+  counts down to the moment the change is heard. While the player is paused
+  the transcoder is held, and the countdown waits.
+- **Reloading.** A stream that starts after a change has the new offset from
+  its first frame, and a player starts a new stream when it seeks outside
+  what is already transcoded. So after a change the service asks the player,
+  over Plex's remote-control protocol, to seek to where it is. If the player
+  then starts a new stream, the change is in effect after a pause of a second
+  or two. If it does not, the service stops asking that player and the change
+  arrives with the countdown. A command is only sent to a player that itself
+  reports it is playing the item.
+
+Skipping forward or back on the remote, far enough to leave what is already
+transcoded, has the same effect as a reload.
 
 ## What an offset applies to
 
@@ -69,6 +86,9 @@ it is made.
 - Library files only. Live TV is passed through unchanged.
 - A change is heard a few seconds after it is made, not instantly: about 5 s
   with the page open, up to about 20 s for the first change otherwise.
+- Reloading on command is unproven. On the one player it was tried with, a
+  Roku Ultra, the seek was accepted but no new stream started, so changes
+  arrived with the countdown.
 - The page has no login.
 - Tested with a simulated player (see below) on one server. Plex builds the
   transcoder's command line, and a later Plex version may build it

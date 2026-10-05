@@ -7,6 +7,7 @@ Run with:  python3 -m plex_audio_offset.server
 """
 
 import argparse
+import itertools
 import json
 import logging
 import os
@@ -31,9 +32,12 @@ PLEX_PREFS = ("/var/lib/plexmediaserver/Library/Application Support/"
 # How long a session's settings outlive its transcoder. Plex stops and starts
 # the transcoder on every seek, so a session is briefly without one.
 GRACE_SECONDS = 120
-# A playing player reports its position every few seconds. Without a report
-# for this long, its position is not trusted for pacing.
-STALE_SECONDS = 30
+# A new transcoder gets ahead of its player within seconds, so it is watched
+# closely for this long after it starts.
+YOUNG_SECONDS = 15
+# While tuning, a transcoder whose player has not reported yet may get this
+# much further ahead than the tuning lead, so that playback can start.
+START_MARGIN = 3.0
 # A transcoder for a player that is not known yet starts at playback speed.
 # This is how much of the stream it holds that pace for, at most.
 HOLD_SECONDS = 4
@@ -44,6 +48,13 @@ MAX_PREFIXES = 50
 # Sessions this service starts itself to make Plex download a codec.
 CODEC_SESSION = "plex-audio-offset-codec-"
 CODEC_RETRY_SECONDS = 3600
+# Applying a change at once: the player is told to seek to where it is, a
+# little back so nothing is missed. It then drops what it had buffered and
+# Plex starts a new transcoder, which has the new offset from its first frame.
+APPLY_DELAY = 0.6      # seconds after the last change, so a run of taps is one reload
+REWIND_MS = 1000
+RELOAD_WAIT = 8        # seconds for the new transcoder to show up
+NAME = "plex-audio-offset"
 
 
 class Plex:
@@ -61,6 +72,36 @@ class Plex:
 
     def get(self, path):
         return ET.fromstring(self.fetch(path))
+
+
+class Remote:
+    """Remote control of Plex players, as Plex's own apps do it (Plex Companion)."""
+
+    def __init__(self):
+        self.ids = itertools.count(int(time.time()) % 1000000)
+
+    def request(self, address, client_id, path, params):
+        query = urlencode(dict(params, commandID=next(self.ids)))
+        request = Request("http://%s:%s%s?%s" % (address[0], address[1], path, query), headers={
+            "X-Plex-Client-Identifier": NAME, "X-Plex-Device-Name": NAME,
+            "X-Plex-Target-Client-Identifier": client_id})
+        with urlopen(request, timeout=4) as response:
+            return response.read()
+
+    def timeline(self, address, client_id):
+        """The video the player has open: state, position and item, or None."""
+        root = ET.fromstring(self.request(address, client_id, "/player/timeline/poll", {"wait": 0}))
+        for element in root.iter("Timeline"):
+            if element.get("type") == "video":
+                position = element.get("time", "")
+                return {"state": element.get("state", ""),
+                        "time_ms": int(position) if position.isdigit() else None,
+                        "rating_key": element.get("ratingKey", "")}
+        return None
+
+    def seek(self, address, client_id, offset_ms):
+        self.request(address, client_id, "/player/playback/seekTo",
+                     {"type": "video", "offset": int(offset_ms)})
 
 
 class Playback:
@@ -94,18 +135,15 @@ class Playback:
         self.files = [part.get("file") for part in element.iter("Part") if part.get("file")]
 
     def playhead_ms(self, now):
-        """Position now, estimated from the last report of the player."""
+        """Position now, estimated from the last report of the player.
+
+        While playing, the estimate runs on from the last report. It can then
+        only be too far along (the player may have stopped without saying so),
+        never too far back, as long as the report's arrival was seen (fresh).
+        """
         if self.state != "playing":
             return self.view_offset_ms
         return self.view_offset_ms + (now - self.view_changed) * 1000
-
-    def reliable(self, now):
-        """Whether the estimate is good enough to pace the transcoder by.
-
-        Pacing must never mistake a player for being further behind than it
-        is. That needs a report whose arrival was seen, and not too long ago.
-        """
-        return self.state == "playing" and self.fresh and now - self.view_changed < STALE_SECONDS
 
 
 class Proc:
@@ -198,6 +236,13 @@ class Controller:
         self.shim_state = None
         self.plex_ok = True
         self.dirty = False
+        self.remote = Remote()
+        self.apply_delay = APPLY_DELAY
+        self.players = {}         # player id -> (host, port), for players that take commands
+        self.players_checked = -1e9
+        self.instant = {}         # player id -> whether a commanded seek reloaded its stream
+        self.reloads = {}         # session -> a commanded seek whose effect is awaited
+        self.timers = {}          # session -> timer of a reload about to be commanded
         self.wanted = []          # codec libraries the shim found missing
         self.codec_attempts = {}  # (directory, codec) -> time of the last fetch
         self.load()
@@ -340,6 +385,13 @@ class Controller:
                 for element in self.plex.get("/transcode/sessions").iter("TranscodeSession"):
                     if element.get("maxOffsetAvailable"):
                         frontiers[element.get("key", "")] = float(element.get("maxOffsetAvailable"))
+                if now - self.players_checked > 10:
+                    self.players = {
+                        element.get("machineIdentifier", ""): (element.get("host"), element.get("port"))
+                        for element in self.plex.get("/clients")
+                        if element.get("host") and element.get("port")
+                        and "playback" in element.get("protocolCapabilities", "").split(",")}
+                    self.players_checked = now
         except (OSError, ET.ParseError, ValueError) as error:
             if self.plex_ok:
                 log.warning("cannot read sessions from Plex: %s", error)
@@ -435,6 +487,17 @@ class Controller:
                             proc.session, proc.pid, error)
             if proc.pending is not None and self.eta(proc, playback, now) == 0:
                 proc.pending = None
+        for session, reload in list(self.reloads.items()):
+            if any(proc.session == session and proc.pid not in reload["pids"]
+                   for proc in self.procs.values()):
+                self.instant[reload["client"]] = True
+                del self.reloads[session]
+                log.info("session %s: the player reloaded the stream; the change is in effect", session)
+            elif now - reload["sent"] > RELOAD_WAIT:
+                self.instant[reload["client"]] = False
+                del self.reloads[session]
+                log.info("session %s: the player did not reload the stream; "
+                         "changes will arrive with a delay from now on", session)
         for table in (self.overrides, self.tuning, self.last_active):
             for session in list(table):
                 if now - self.last_active.get(session, 0) > GRACE_SECONDS:
@@ -460,28 +523,43 @@ class Controller:
     def desired_speed(self, proc, playback, now):
         """Pace of the transcoder.
 
-        Left alone it runs flat out until Plex stops it a minute or more
-        ahead of the player, and a change would take that long to be heard.
-        So it is kept at playback speed once it is normal_lead ahead, and
-        while someone is tuning it is slowed until it is only lead ahead.
+        Left alone it runs flat out and is soon minutes ahead of the player,
+        and a change would take that long to be heard. So it is kept at
+        playback speed once it is normal_lead ahead, and while someone is
+        tuning it is slowed until it is only lead ahead.
 
-        Outside tuning it is never slowed below playback speed, so a wrong
-        idea of where the player is cannot eat into what the player has.
+        It is slowed below playback speed only when that cannot starve the
+        player: while tuning with a position whose report was seen arriving,
+        or while the player is paused.
         """
         if proc.held and not proc.identified and time.time() - proc.started < HOLD_SECONDS:
             return REALTIME
         frontier = self.frontiers.get(proc.session)
-        if playback is None or frontier is None or not playback.reliable(now):
+        tuning = self.tuning.get(proc.session, 0) > now
+        if playback is not None and self.instant.get(playback.client_id):
+            tuning = False  # changes reach this player by reloading, not by waiting
+        target = self.lead if tuning else self.normal_lead
+        if frontier is None or target <= 0:
             return UNTHROTTLED
+        if playback is None or (playback.state == "playing" and not playback.fresh):
+            # No usable position yet, as at the start of a session. The player
+            # cannot be before where the transcoder began.
+            position = max(proc.start, playback.view_offset_ms / 1000.0 if playback else 0)
+            margin = START_MARGIN if tuning else 0
+            return REALTIME if frontier - position >= target + margin else UNTHROTTLED
         lead = frontier - playback.playhead_ms(now) / 1000.0
-        if self.tuning.get(proc.session, 0) > now:
-            if lead > self.lead + 1.5 or (proc.speed == SLOW and lead > self.lead):
+        if playback.state == "paused":
+            # The position is exact and nothing is being played: hold still.
+            return SLOW if lead >= target else UNTHROTTLED
+        if playback.state != "playing":
+            return REALTIME if lead >= target else UNTHROTTLED  # buffering: let it fill
+        if tuning:
+            if lead > target + 1.5 or (proc.speed == SLOW and lead > target):
                 return SLOW
-            if lead < max(self.lead - 2.0, 1.5):
+            if lead < max(target - 2.0, 1.5):
                 return UNTHROTTLED
             return REALTIME
-        if self.normal_lead > 0 and (
-                lead >= self.normal_lead or (proc.speed == REALTIME and lead >= self.normal_lead - 5)):
+        if lead >= target or (proc.speed == REALTIME and lead >= target - 5):
             return REALTIME
         return UNTHROTTLED
 
@@ -534,9 +612,9 @@ class Controller:
                 markers = self.pending_markers()
                 if changed or markers or now >= next_poll:
                     self.refresh_plex(now)
-                    if any(not proc.identified and time.time() - proc.started < 10
+                    if any(time.time() - proc.started < YOUNG_SECONDS
                            for proc in self.procs.values()):
-                        next_poll = now + 0.15  # a new session: find its player quickly
+                        next_poll = now + 0.15  # a new transcoder: find its player, catch it early
                     elif any(expiry > now for expiry in self.tuning.values()):
                         next_poll = now + 0.5
                     elif self.procs or self.playbacks:
@@ -561,6 +639,55 @@ class Controller:
                         proc.command("arealtime", "speed", "%g" % UNTHROTTLED)
                     except OSError:
                         pass
+
+    def schedule_reload(self, session):
+        """Arrange for the session's player to reload the stream shortly."""
+        procs = [proc for proc in self.procs.values() if proc.session == session]
+        playback = self.find_playback(session, procs[0].source) if procs else None
+        if (playback is None or playback.client_id not in self.players
+                or self.instant.get(playback.client_id) is False):
+            return
+        if session in self.timers:
+            self.timers[session].cancel()
+        timer = threading.Timer(self.apply_delay, self.reload, (session,))
+        timer.daemon = True
+        self.timers[session] = timer
+        timer.start()
+
+    def reload(self, session):
+        """Tell the session's player to seek to where it is.
+
+        A command goes out only when the player itself says it has this item
+        open and gives a position: an app that is not playing must be left
+        alone.
+        """
+        with self.lock:
+            self.timers.pop(session, None)
+            procs = [proc for proc in self.procs.values() if proc.session == session]
+            playback = self.find_playback(session, procs[0].source) if procs else None
+            address = self.players.get(playback.client_id) if playback else None
+            if address is None:
+                return
+            client_id, rating_key, device = playback.client_id, playback.rating_key, playback.device
+            pids = set(proc.pid for proc in procs)
+        try:
+            timeline = self.remote.timeline(address, client_id)
+            # A player that names another item is on something else; one that
+            # names none is judged by its state and position alone.
+            if (timeline is None or timeline["time_ms"] is None
+                    or timeline["state"] not in ("playing", "paused")
+                    or timeline["rating_key"] not in ("", rating_key)):
+                log.info("session %s: %s is not playing this item just now (it says %s); "
+                         "the change arrives with the stream", session, device, timeline)
+                return
+            target = max(0, timeline["time_ms"] - REWIND_MS)
+            self.remote.seek(address, client_id, target)
+        except (OSError, ET.ParseError, ValueError) as error:
+            log.warning("session %s: cannot command %s: %s", session, device, error)
+            return
+        with self.lock:
+            self.reloads[session] = {"sent": time.monotonic(), "pids": pids, "client": client_id}
+        log.info("session %s: asked %s to reload at %.1f s", session, device, target / 1000.0)
 
     # ---- API ---------------------------------------------------------
 
@@ -589,6 +716,8 @@ class Controller:
                     "pending": proc.pending is not None,
                     "confirmed": proc.confirmed,
                     "lead_s": None,
+                    "applying": session in self.timers or session in self.reloads,
+                    "instant": bool(playback and self.instant.get(playback.client_id)),
                 }
                 if playback is not None:
                     shown.add(playback.key)
@@ -619,7 +748,8 @@ class Controller:
                               "playback to pick it up.")
                 entry = {"id": key, "adjustable": False, "reason": reason,
                          "offset_ms": client["offset_ms"] if client else 0, "tuning": False,
-                         "eta_s": 0, "pending": False, "confirmed": True, "lead_s": None}
+                         "eta_s": 0, "pending": False, "confirmed": True, "lead_s": None,
+                         "applying": False, "instant": False}
                 entry.update(self.describe(playback, now))
                 sessions.append(entry)
             active = set(playback.client_id for playback in self.playbacks.values())
@@ -659,6 +789,8 @@ class Controller:
                 self.clients[client_id]["offset_ms"] = offset_ms
                 self.dirty = True
             self.reconcile(now)
+            if session is not None:
+                self.schedule_reload(session)
         return offset_ms
 
     def forget(self, client_id):
