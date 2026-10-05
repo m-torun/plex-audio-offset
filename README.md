@@ -38,24 +38,24 @@ the service stopped, every start is passed through.
 
 A change can only alter audio the server has not sent yet, and the player
 already holds some seconds of the stream. You hear the change when playback
-reaches the first audio that was made after it. Two things keep that short:
+reaches the first audio that was made after it.
 
-- **Pacing.** Left alone, Plex's transcoder is soon minutes ahead of the
-  player, and a change would take that long to be heard. The service keeps it
-  about 20 s ahead, and about 5 s ahead while the page is open. The page
-  counts down to the moment the change is heard. While the player is paused
-  the transcoder is held, and the countdown waits.
-- **Reloading.** A stream that starts after a change has the new offset from
-  its first frame, and a player starts a new stream when it seeks outside
-  what is already transcoded. So after a change the service asks the player,
-  over Plex's remote-control protocol, to seek to where it is. If the player
-  then starts a new stream, the change is in effect after a pause of a second
-  or two. If it does not, the service stops asking that player and the change
-  arrives with the countdown. A command is only sent to a player that itself
-  reports it is playing the item.
+Left alone, Plex's transcoder is soon minutes ahead of the player, and a
+change would take that long to be heard. So the service paces it: about 10 s
+ahead of the player normally, and about 3 s ahead while the page is open. The
+page counts down to the moment the change is heard. While the player is
+paused the transcoder is held, and the countdown waits.
 
-Skipping forward or back on the remote, far enough to leave what is already
-transcoded, has the same effect as a reload.
+On a Roku Ultra a change was heard 3 to 4 seconds after the tap, with the
+picture playing on. That is close to the least a player like it allows: it
+played without a stall with 1.5 to 3 s of stream in hand.
+
+Making the player reload the stream instead does not get there faster. A
+seek to where the player already is stays inside its buffer and changes
+nothing, and a seek that does start a new stream costs 4 s or more of
+loading. A stream that starts for any other reason (a new playback, or a skip
+on the remote beyond what is transcoded) has the current offset from its
+first frame.
 
 ## What an offset applies to
 
@@ -84,16 +84,14 @@ transcoded, has the same effect as a reload.
 - Copied AC-3 is encoded again for every stream, also at an offset of 0, so
   that it can be shifted at any moment. `--leave-copied-audio` turns that off.
 - Library files only. Live TV is passed through unchanged.
-- A change is heard a few seconds after it is made, not instantly: about 5 s
-  with the page open, up to about 20 s for the first change otherwise.
-- Reloading on command is unproven. On the one player it was tried with, a
-  Roku Ultra, the seek was accepted but no new stream started, so changes
-  arrived with the countdown.
+- A change is heard a few seconds after it is made, not instantly: 3 to 4 s
+  with the page open for a moment, up to about 10 s for a first change made
+  right after opening it.
 - The page has no login.
-- Tested with a simulated player (see below) on one server. Plex builds the
-  transcoder's command line, and a later Plex version may build it
-  differently; the wrapper then passes it through and the offset stops
-  applying until the tool is updated.
+- Tested on one server with one real player (a Roku Ultra) and a simulated
+  one (see below). Plex builds the transcoder's command line, and a later Plex
+  version may build it differently; the wrapper then passes it through and
+  the offset stops applying until the tool is updated.
 
 ## Install
 
@@ -128,9 +126,10 @@ Play something, open the page, and move the offset until lips and sound agree.
 - Players you have seen before are listed under "Saved players" and can be
   adjusted or forgotten while idle.
 
-A new session gets its player's saved offset from the start. If Plex has not
-yet said which player it is, the stream starts without an offset and is
-corrected within the first second or two.
+A new session gets its player's saved offset from the start. When Plex has
+not yet said which player a new stream is for, it starts with the offset of
+the player seen last, and is corrected within seconds if that was the wrong
+one.
 
 Encoding AC-3 again needs Plex's AC-3 encoder, which Plex downloads on demand
 into a folder that is new after each Plex upgrade. When it is missing, the
@@ -138,6 +137,21 @@ stream is left as a copy, the service starts a few-second transcode of the
 same item to make Plex fetch the encoder, and the next seek or playback picks
 it up. That request shows up in Plex's device list as `plex-audio-offset`.
 Run the service with `--leave-copied-audio` to never touch copied audio.
+
+## Testing on a real player
+
+`tools/player_test.py` plays an item on a real player through Plex's
+remote-control protocol and checks the service against it: the saved offset
+at the start, pacing with the page open and closed, live changes, pause and
+resume, and a seek. It stops playback and puts the watch state and the
+player's offset back. Nobody needs to hold the remote, but the screen shows
+the item while it runs (about two minutes).
+
+    python3 tools/player_test.py --player roku --rating-key 1234 \
+        --plex-address 192.0.2.10:32400 --launch-url http://192.0.2.20:8060/launch/13535
+
+`--launch-url` opens the Plex app when it is not running; the example is the
+one for a Roku.
 
 ## Testing without a player
 

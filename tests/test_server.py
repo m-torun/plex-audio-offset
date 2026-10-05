@@ -21,7 +21,6 @@ class FakePlex:
         self.frontiers = {}
         self.fetched = []
         self.on_start = lambda: None
-        self.clients = []  # players Plex can command: (id, host, port)
 
     def get(self, path):
         root = ET.Element("MediaContainer")
@@ -39,10 +38,6 @@ class FakePlex:
                     ET.SubElement(video, "TranscodeSession",
                                   key="/transcode/sessions/" + session["transcode"],
                                   audioDecision=session.get("audio", "transcode"))
-        elif path == "/clients":
-            for client_id, host, port in self.clients:
-                ET.SubElement(root, "Server", machineIdentifier=client_id, host=host, port=str(port),
-                              protocolCapabilities="timeline,playback,navigation,playqueues")
         else:
             for key, value in self.frontiers.items():
                 ET.SubElement(root, "TranscodeSession", key=key, maxOffsetAvailable=str(value))
@@ -54,20 +49,6 @@ class FakePlex:
             self.on_start()
             return b"#EXTM3U\nsession/x/base/index.m3u8\n"
         return b""
-
-
-class FakeRemote:
-    """A player that answers remote-control requests."""
-
-    def __init__(self, state="playing", time_ms=305500, rating_key="77"):
-        self.answer = {"state": state, "time_ms": time_ms, "rating_key": rating_key}
-        self.seeks = []
-
-    def timeline(self, address, client_id):
-        return dict(self.answer)
-
-    def seek(self, address, client_id, offset_ms):
-        self.seeks.append((address, client_id, offset_ms))
 
 
 class ControllerTest(unittest.TestCase):
@@ -89,7 +70,8 @@ class ControllerTest(unittest.TestCase):
         if clients:
             shim.write_json(os.path.join(self.state_dir, "offsets.json"),
                             {"clients": clients, "prefixes": {}})
-        self.ctl = server.Controller(self.plex, self.run_dir, self.state_dir)
+        # The leads the tests below were written for; the defaults are smaller.
+        self.ctl = server.Controller(self.plex, self.run_dir, self.state_dir, lead=5.0, normal_lead=20.0)
         return self.ctl
 
     def spawn(self, pid, session, offset_ms=0, source=FILE, held=False):
@@ -136,8 +118,9 @@ class ControllerTest(unittest.TestCase):
         state = self.shim_state()
         self.assertEqual(state["sessions"]["abc-7"], 120)
         self.assertEqual(state["prefixes"], {"abc": 120})
-        self.assertEqual(state["wait_unknown_ms"], 300)
-        self.assertEqual(state["hold_unknown_s"], 4)
+        # The only player there is: a session nobody is known for starts with its offset.
+        self.assertEqual((state["default_offset_ms"], state["wait_unknown_ms"], state["hold_unknown_s"]),
+                         (120, 0, 0))
         self.step()
         self.assertEqual(self.commands(11), [])
 
@@ -150,6 +133,17 @@ class ControllerTest(unittest.TestCase):
         self.step()
         self.assertEqual(self.commands(11), ["casetpts@pao -1 expr PTS+(0.120)/TB",
                                              "carealtime@pao -1 speed 1000"])
+
+    def test_an_unknown_session_starts_with_the_offset_of_the_player_seen_last(self):
+        self.controller({"roku": {"offset_ms": 120, "seen": 100}, "mac": {"offset_ms": 0, "seen": 200}})
+        self.step()
+        state = self.shim_state()
+        # Players differ, so the shim is told to wait and to start held.
+        self.assertEqual((state["default_offset_ms"], state["wait_unknown_ms"], state["hold_unknown_s"]),
+                         (0, 300, 6))
+        self.plex.sessions = [{"client": "roku", "view": 1000}]  # the Roku shows up
+        self.step()
+        self.assertEqual(self.shim_state()["default_offset_ms"], 120)
 
     def test_nothing_to_wait_for_without_saved_offsets(self):
         self.controller()
@@ -258,78 +252,6 @@ class ControllerTest(unittest.TestCase):
         self.step()
         self.assertEqual(self.commands(11), ["carealtime@pao -1 speed 1000"])  # starved: let it fill
 
-    def reloading(self, **timeline):
-        """A session on a player that Plex can command, with the page not open."""
-        self.controller()
-        self.ctl.apply_delay = 0.01
-        self.ctl.remote = FakeRemote(**timeline)
-        self.plex.clients = [("roku", "192.0.2.7", 8324)]
-        self.session = {"client": "roku", "view": 300000, "transcode": "abc-7"}
-        self.plex.sessions = [self.session]
-        self.plex.frontiers = {"abc-7": 360.0}
-        self.spawn(11, "abc-7")
-        self.step()
-        self.commands(11)
-
-    def change(self, offset_ms):
-        self.ctl.set_offset(offset_ms, session="abc-7")
-        timer = self.ctl.timers.get("abc-7")
-        if timer is not None:
-            timer.join(5)
-
-    def test_a_change_makes_the_player_reload_the_stream_where_it_is(self):
-        self.reloading()
-        self.ctl.set_offset(20, session="abc-7")
-        self.assertTrue(self.ctl.snapshot()["sessions"][0]["applying"])
-        self.change(50)  # a second tap soon after: still one reload
-        self.assertEqual(self.ctl.remote.seeks, [(("192.0.2.7", "8324"), "roku", 304500)])
-        self.assertTrue(self.ctl.snapshot()["sessions"][0]["applying"])
-
-        self.alive.discard(11)        # Plex replaces the transcoder
-        self.spawn(12, "abc-7", offset_ms=50)
-        self.step()
-        (entry,) = self.ctl.snapshot()["sessions"]
-        self.assertEqual((entry["applying"], entry["instant"], entry["pending"], entry["offset_ms"]),
-                         (False, True, False, 50))
-        self.assertEqual(self.shim_state()["sessions"]["abc-7"], 50)
-        # Such a player needs no waiting game: the transcoder is not slowed for it.
-        self.session["view"] = 300100
-        self.step()
-        self.assertNotIn("carealtime@pao -1 speed 0.1", self.commands(12))
-
-    def test_a_player_that_is_not_playing_the_item_is_sent_nothing(self):
-        for timeline in ({"state": "stopped", "time_ms": None}, {"state": "buffering"},
-                         {"rating_key": "999"}):
-            with self.subTest(timeline):
-                self.reloading(**timeline)
-                self.change(50)
-                self.assertEqual(self.ctl.remote.seeks, [])
-                self.assertFalse(self.ctl.snapshot()["sessions"][0]["applying"])
-                self.alive.clear()
-                self.readers.clear()
-                shutil.rmtree(self.run_dir)
-                os.makedirs(self.run_dir)
-
-    def test_a_player_plex_cannot_command_gets_the_change_with_the_stream(self):
-        self.reloading()
-        self.plex.clients = []
-        self.ctl.players = {}
-        self.change(50)
-        self.assertEqual(self.ctl.remote.seeks, [])
-        (entry,) = self.ctl.snapshot()["sessions"]
-        self.assertTrue(entry["pending"] and not entry["applying"])
-
-    def test_a_player_that_does_not_reload_is_not_asked_again(self):
-        self.reloading()
-        self.change(50)
-        self.assertEqual(len(self.ctl.remote.seeks), 1)
-        with self.ctl.lock:
-            self.ctl.reconcile(time.monotonic() + 9)  # no new transcoder showed up
-        self.assertIs(self.ctl.instant["roku"], False)
-        self.change(80)
-        self.assertEqual(len(self.ctl.remote.seeks), 1)
-        self.assertFalse(self.ctl.snapshot()["sessions"][0]["applying"])
-
     def test_offsets_are_clamped(self):
         self.controller({"roku": {"offset_ms": 0}})
         self.assertEqual(self.ctl.set_offset(99999, client_id="roku"), 2000)
@@ -430,41 +352,6 @@ class ControllerTest(unittest.TestCase):
         self.plex.get = mock.Mock(side_effect=OSError("refused"))
         self.step()
         self.assertFalse(self.ctl.snapshot()["plex_ok"])
-
-
-class RemoteTest(unittest.TestCase):
-    def test_it_speaks_to_a_player_the_way_plex_apps_do(self):
-        seen = []
-
-        class Player(server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                seen.append((self.path, self.headers["X-Plex-Target-Client-Identifier"],
-                             self.headers["X-Plex-Client-Identifier"]))
-                body = (b'<MediaContainer><Timeline type="music" state="stopped"/>'
-                        b'<Timeline type="video" state="playing" time="82000" ratingKey="2209"/>'
-                        b'</MediaContainer>')
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, format, *args):
-                pass
-
-        httpd = server.Server(("127.0.0.1", 0), Player)
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        self.addCleanup(httpd.server_close)
-        self.addCleanup(httpd.shutdown)
-        remote = server.Remote()
-        address = ("127.0.0.1", httpd.server_address[1])
-        self.assertEqual(remote.timeline(address, "roku"),
-                         {"state": "playing", "time_ms": 82000, "rating_key": "2209"})
-        remote.seek(address, "roku", 81000.4)
-        (poll, target, sender), (seek, _, _) = seen
-        self.assertRegex(poll, r"^/player/timeline/poll\?wait=0&commandID=\d+$")
-        self.assertRegex(seek, r"^/player/playback/seekTo\?type=video&offset=81000&commandID=\d+$")
-        self.assertEqual((target, sender), ("roku", "plex-audio-offset"))
-        self.assertGreater(int(seek.rsplit("=", 1)[1]), int(poll.rsplit("=", 1)[1]))
 
 
 class HttpTest(unittest.TestCase):

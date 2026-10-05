@@ -80,9 +80,9 @@
     <b>Sound arrives after the lips move?</b> Go earlier (minus).<br>
     <b>Sound arrives before the lips move?</b> Go later (plus).<br>
     The offset is remembered for each player and applied whenever it plays.<br>
-    A change makes the player reload the stream where it is, which shows as a
-    pause of a second or two. Players that cannot be told to do that pick the
-    change up a few seconds later instead.
+    A change is heard a few seconds after the tap, because the player
+    already holds that much of the stream. Keep this page open while tuning:
+    it keeps that wait short.
   </p>
 </main>
 
@@ -172,7 +172,6 @@ function change(card, ms, delay) {
 }
 
 function statusOf(session) {
-  if (session.applying) return ["wait", "Applying now: the picture pauses for a moment"];
   if (session.pending) {
     if (session.eta_s === null) return ["wait", "Change is on its way…"];
     const seconds = Math.max(1, Math.ceil(session.eta_s));
@@ -184,7 +183,6 @@ function statusOf(session) {
   if (session.tuning && session.lead_s !== null && session.lead_s > 8) {
     return ["", "Getting closer to live: changes land faster in about " + Math.ceil(session.lead_s - 5) + " s"];
   }
-  if (session.instant) return ["ok", "In effect. Saved for this player."];
   if (session.tuning) return ["ok", "In effect. Changes land in a few seconds."];
   return ["", session.client ? "Saved for this player" : ""];
 }
