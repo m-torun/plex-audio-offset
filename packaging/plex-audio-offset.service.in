@@ -1,0 +1,22 @@
+[Unit]
+Description=Live audio offset control for Plex playback
+After=network.target plexmediaserver.service
+
+[Service]
+User=@USER@
+WorkingDirectory=@PREFIX@
+ExecStart=@PYTHON@ -m plex_audio_offset.server --port @PORT@ --run-dir @RUN_DIR@
+# Removing the runtime directory is what switches the transcoder shim off, so
+# it goes away when the service is stopped but survives a restart.
+RuntimeDirectory=plex-audio-offset
+RuntimeDirectoryPreserve=restart
+StateDirectory=plex-audio-offset
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

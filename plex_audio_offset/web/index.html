@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
+<link rel="icon" href="data:,">
+<title>Audio offset</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #16181d; --muted: #646b78;
+    --line: #dfe2e8; --accent: #c2410c; --accent-text: #ffffff; --key: #eceef2;
+    --good: #15803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --card: #1e2127; --text: #eef0f4; --muted: #9aa1ae;
+      --line: #30343c; --accent: #fb923c; --accent-text: #1a1206; --key: #2a2e36;
+      --good: #4ade80;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 520px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 4px 0 16px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 28px 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-bottom: 14px; }
+  .device { font-weight: 650; overflow-wrap: anywhere; }
+  .title { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+  .readout { text-align: center; margin: 18px 0 2px; font-size: 52px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.02em; line-height: 1; }
+  .readout small { font-size: 20px; font-weight: 600; color: var(--muted); margin-left: 4px; }
+  .meaning { text-align: center; color: var(--muted); font-size: 14px; min-height: 20px; }
+  input[type=range] { width: 100%; margin: 18px 0 6px; accent-color: var(--accent); height: 32px; }
+  .scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+  button {
+    font: inherit; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text);
+    background: var(--key); border: 0; border-radius: 12px; min-height: 52px; padding: 0 4px;
+    touch-action: manipulation; cursor: pointer;
+  }
+  button:active { filter: brightness(.9); }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  button.zero { background: transparent; border: 1px solid var(--line); }
+  .status { margin-top: 14px; font-size: 14px; min-height: 20px; text-align: center; color: var(--muted); }
+  .status.wait { color: var(--accent); font-weight: 600; }
+  .status.ok { color: var(--good); font-weight: 600; }
+  .reason { margin-top: 12px; font-size: 14px; color: var(--muted); }
+  .row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; padding-top: 0; }
+  .row:last-child { padding-bottom: 0; }
+  .row .who { flex: 1; min-width: 0; }
+  .row .value { font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .row button { min-height: 44px; min-width: 48px; }
+  .row button.forget { background: transparent; color: var(--muted); font-weight: 400; min-width: 44px; }
+  .empty, .help { color: var(--muted); font-size: 14px; }
+  .help { margin-top: 24px; }
+  .help b { color: var(--text); }
+  .alert { background: var(--accent); color: var(--accent-text); border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; font-size: 14px; font-weight: 600; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Audio offset</h1>
+  <div id="alert" class="alert" hidden></div>
+  <div id="sessions"></div>
+  <p id="empty" class="card empty" hidden>Nothing is playing. Start something in Plex and it will appear here. Saved offsets are applied on their own.</p>
+  <div id="saved" hidden>
+    <h2>Saved players</h2>
+    <div id="clients" class="card"></div>
+  </div>
+  <p class="help">
+    <b>Sound arrives after the lips move?</b> Go earlier (minus).<br>
+    <b>Sound arrives before the lips move?</b> Go later (plus).<br>
+    The offset is remembered for each player and applied whenever it plays.
+  </p>
+</main>
+
+<template id="session-template">
+  <section class="card">
+    <div class="device"></div>
+    <div class="title"></div>
+    <div class="controls">
+      <div class="readout"><span class="number"></span><small>ms</small></div>
+      <div class="meaning"></div>
+      <input type="range" min="-1000" max="1000" step="10" aria-label="Audio offset in milliseconds">
+      <div class="scale"><span>earlier</span><span>later</span></div>
+      <div class="keys">
+        <button data-step="-50">&minus;50</button>
+        <button data-step="-10">&minus;10</button>
+        <button class="zero" data-set="0">0</button>
+        <button data-step="10">+10</button>
+        <button data-step="50">+50</button>
+      </div>
+      <div class="status" role="status"></div>
+    </div>
+    <div class="reason"></div>
+  </section>
+</template>
+
+<script>
+const cards = new Map();       // session id -> {root, value, touched, ...}
+let limit = 2000;
+let failures = 0;
+
+const signed = ms => (ms > 0 ? "+" : ms < 0 ? "−" : "") + Math.abs(ms);
+
+function meaning(ms) {
+  if (ms === 0) return "audio as recorded";
+  return "audio " + Math.abs(ms) + " ms " + (ms > 0 ? "later" : "earlier");
+}
+
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!response.ok) throw new Error((await response.json()).error || response.statusText);
+  return response.json();
+}
+
+function makeCard(id) {
+  const root = document.getElementById("session-template").content.firstElementChild.cloneNode(true);
+  const card = {
+    id, root, value: 0, touched: 0, timer: null, client: null, kept: 0,
+    device: root.querySelector(".device"), title: root.querySelector(".title"),
+    controls: root.querySelector(".controls"), number: root.querySelector(".number"),
+    meaning: root.querySelector(".meaning"), slider: root.querySelector("input"),
+    status: root.querySelector(".status"), reason: root.querySelector(".reason"),
+  };
+  card.slider.addEventListener("input", () => change(card, Number(card.slider.value), 150));
+  root.querySelectorAll("button").forEach(button => button.addEventListener("click", () => {
+    const next = "set" in button.dataset ? Number(button.dataset.set) : card.value + Number(button.dataset.step);
+    change(card, next, 0);
+  }));
+  document.getElementById("sessions").appendChild(root);
+  return card;
+}
+
+function show(card, ms) {
+  card.value = ms;
+  card.number.textContent = signed(ms);
+  card.meaning.textContent = meaning(ms);
+  card.slider.value = Math.max(-1000, Math.min(1000, ms));
+}
+
+// Show a new value at once, and send it after a short pause so that dragging
+// the slider does not flood the server.
+function change(card, ms, delay) {
+  ms = Math.max(-limit, Math.min(limit, Math.round(ms / 5) * 5));
+  card.touched = Date.now();
+  show(card, ms);
+  card.status.className = "status wait";
+  card.status.textContent = "Sending…";
+  clearTimeout(card.timer);
+  card.timer = setTimeout(async () => {
+    try {
+      await post("/api/offset", {session: card.id, offset_ms: ms});
+      refresh();
+    } catch (error) {
+      card.status.textContent = "Could not set the offset: " + error.message;
+    }
+  }, delay);
+}
+
+function statusOf(session) {
+  if (session.pending) {
+    if (session.eta_s === null) return ["wait", "Change is on its way…"];
+    return ["wait", "You will hear it in about " + Math.max(1, Math.ceil(session.eta_s)) + " s"];
+  }
+  if (session.tuning && session.lead_s !== null && session.lead_s > 8) {
+    return ["", "Getting closer to live: changes land faster in about " + Math.ceil(session.lead_s - 5) + " s"];
+  }
+  if (session.tuning) return ["ok", "In effect. Changes land in a few seconds."];
+  return ["", session.client ? "Saved for this player" : ""];
+}
+
+function render(state) {
+  limit = state.max_offset_ms;
+  const alert = document.getElementById("alert");
+  alert.hidden = state.plex_ok;
+  alert.textContent = "Cannot reach Plex. Showing the last known state.";
+
+  const live = new Set();
+  for (const session of state.sessions) {
+    live.add(session.id);
+    const card = cards.get(session.id) || makeCard(session.id);
+    cards.set(session.id, card);
+    card.device.textContent = session.device;
+    card.title.textContent = session.title + (session.state && session.state !== "playing" ? " (" + session.state + ")" : "");
+    card.adjustable = session.adjustable;
+    // While this page is open, keep the stream close to live so that a
+    // change is heard within seconds.
+    if (session.adjustable && Date.now() - card.kept > 20000) {
+      card.kept = Date.now();
+      post("/api/tuning", {session: session.id, on: true}).catch(() => {});
+    }
+    card.controls.hidden = !session.adjustable;
+    card.reason.hidden = session.adjustable;
+    card.reason.textContent = session.reason +
+      (session.offset_ms ? " Saved offset for this player: " + signed(session.offset_ms) + " ms." : "");
+    // Do not fight the finger: keep what the user just set for a moment.
+    if (Date.now() - card.touched > 1500) {
+      show(card, session.offset_ms);
+      const [kind, text] = statusOf(session);
+      card.status.className = "status " + kind;
+      card.status.textContent = text;
+    }
+  }
+  for (const [id, card] of cards) {
+    if (!live.has(id)) { card.root.remove(); cards.delete(id); }
+  }
+  document.getElementById("empty").hidden = state.sessions.length > 0;
+
+  const idle = state.clients.filter(client => !client.active);
+  document.getElementById("saved").hidden = idle.length === 0;
+  const list = document.getElementById("clients");
+  list.replaceChildren(...idle.map(client => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const who = document.createElement("div");
+    who.className = "who";
+    const name = document.createElement("div");
+    name.className = "device";
+    name.textContent = client.name;
+    const product = document.createElement("div");
+    product.className = "title";
+    product.textContent = client.product;
+    who.append(name, product);
+    const value = document.createElement("div");
+    value.className = "value";
+    value.textContent = signed(client.offset_ms) + " ms";
+    row.append(who, value);
+    for (const step of [-10, 10]) {
+      const button = document.createElement("button");
+      button.textContent = signed(step);
+      button.setAttribute("aria-label", (step > 0 ? "Later" : "Earlier") + " by 10 ms for " + client.name);
+      button.addEventListener("click", async () => {
+        await post("/api/offset", {client: client.id, offset_ms: client.offset_ms + step});
+        refresh();
+      });
+      row.append(button);
+    }
+    const forget = document.createElement("button");
+    forget.className = "forget";
+    forget.textContent = "\u2715";
+    forget.setAttribute("aria-label", "Forget " + client.name);
+    forget.addEventListener("click", async () => {
+      if (!confirm("Forget " + client.name + " and its offset?")) return;
+      await post("/api/forget", {client: client.id});
+      refresh();
+    });
+    row.append(forget);
+    return row;
+  }));
+}
+
+async function refresh() {
+  try {
+    const response = await fetch("/api/state", {cache: "no-store"});
+    render(await response.json());
+    failures = 0;
+  } catch (error) {
+    if (++failures >= 3) {
+      const alert = document.getElementById("alert");
+      alert.hidden = false;
+      alert.textContent = "Lost contact with the offset service.";
+    }
+  }
+}
+
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) return refresh();
+  // Let the streams run ahead again as soon as nobody is looking.
+  for (const card of cards.values()) {
+    if (!card.adjustable) continue;
+    card.kept = 0;
+    navigator.sendBeacon("/api/tuning", JSON.stringify({session: card.id, on: false}));
+  }
+});
+</script>
+</body>
+</html>

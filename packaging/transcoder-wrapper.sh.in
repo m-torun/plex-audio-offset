@@ -1,0 +1,17 @@
+#!/bin/sh
+# Installed by plex-audio-offset in place of "Plex Transcoder".
+# The real transcoder is diverted to: @REAL@
+#
+# Everything is passed straight through unless the offset service is running
+# and this is a job that reads a local file and reports progress to Plex, as
+# playback does. DVR recordings read from a URL and thumbnail jobs report no
+# progress, so neither ever reaches the Python shim.
+REAL='@REAL@'
+if [ -e '@RUN_DIR@/enabled' ] && [ -x '@PYTHON@' ] && [ -r '@SHIM@' ]; then
+    case " $* " in
+        *" -i /"*" -progressurl "*)
+            exec '@PYTHON@' -I '@SHIM@' "$REAL" "$@"
+            ;;
+    esac
+fi
+exec "$REAL" "$@"
