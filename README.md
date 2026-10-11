@@ -4,6 +4,10 @@ Shift the audio of Plex playback earlier or later, live, from a web page on
 your phone. The offset is remembered for each player, so a TV whose sound runs
 late keeps its correction for everything it plays.
 
+This project is the daemon that does the shifting. The page is a separate
+small project, [plex-buddy](https://github.com/m-torun/plex-buddy), which talks
+to this daemon's API.
+
 It works with the stock Plex apps. Nothing is installed on the player and no
 media file is changed.
 
@@ -26,7 +30,8 @@ commands on its standard input while it runs.
   player gets the format it asked for.
 - A service keeps the saved offsets, watches Plex's sessions to learn which
   player each transcoder serves, and sends the commands.
-- The page at `http://<server>:8765/` shows what is playing and sets offsets.
+- The service answers an HTTP API on `127.0.0.1:8765` (see "API"). The page
+  that shows what is playing and sets offsets is plex-buddy.
 
 The wrapper is built to stay out of the way. Jobs that do not read a local
 file and report progress to Plex never get past a three-line shell check. For
@@ -104,7 +109,8 @@ or on the server itself:
     sudo ./install.sh install
 
 Options: `--port N` (default 8765), `--plex-home DIR`, `--user NAME`,
-`--python PATH`. The page has no login, so keep the port on your home network.
+`--python PATH`. The API has no login and listens on the server itself only;
+install plex-buddy on the same machine for the page.
 
 The installer registers the wrapper with `dpkg-divert`, so a Plex upgrade
 replaces the real transcoder and leaves the wrapper in place.
@@ -137,6 +143,19 @@ stream is left as a copy, the service starts a few-second transcode of the
 same item to make Plex fetch the encoder, and the next seek or playback picks
 it up. That request shows up in Plex's device list as `plex-audio-offset`.
 Run the service with `--leave-copied-audio` to never touch copied audio.
+
+## API
+
+All on `127.0.0.1:8765`, JSON in and out, no login.
+
+| Request | Does |
+| --- | --- |
+| `GET /api/state` | Every stream (player, title, position, offset, whether it can be shifted and why not, when a pending change will be heard), the saved players, and the offset limit. |
+| `POST /api/offset` | `{"session": id, "offset_ms": n}` for the player of a stream, or `{"client": id, "offset_ms": n}` for a saved player. |
+| `POST /api/forget` | `{"client": id}` drops a saved player and its offset. |
+| `POST /api/tuning` | `{"session": id, "on": true}` keeps a stream close to live so a change is heard within seconds; an interface sends it every 20 s while its page is open, and `false` when it closes. |
+
+To reach the API from another machine, start the service with `--listen 0.0.0.0`.
 
 ## Testing on a real player
 

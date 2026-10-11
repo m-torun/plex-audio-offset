@@ -363,7 +363,6 @@ class HttpTest(unittest.TestCase):
                         {"clients": {"roku": {"offset_ms": 10, "name": "Living Room"}}})
         server.Handler.controller = server.Controller(
             FakePlex(), os.path.join(self.tmp, "run"), os.path.join(self.tmp, "state"))
-        server.Handler.web_dir = os.path.join(os.path.dirname(server.__file__), "web")
         self.httpd = server.Server(("127.0.0.1", 0), server.Handler)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.addCleanup(self.httpd.server_close)
@@ -375,9 +374,9 @@ class HttpTest(unittest.TestCase):
         with urlopen(request, timeout=5) as response:
             return json.load(response)
 
-    def test_page_state_and_offset(self):
+    def test_state_and_offset(self):
         with urlopen(self.base + "/", timeout=5) as response:
-            self.assertIn(b"Audio offset", response.read())
+            self.assertEqual(json.load(response)["service"], "plex-audio-offset")
         self.assertEqual(self.post("/api/offset", b'{"client": "roku", "offset_ms": 35}'),
                          {"offset_ms": 35})
         with urlopen(self.base + "/api/state", timeout=5) as response:

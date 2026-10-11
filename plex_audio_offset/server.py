@@ -1,7 +1,13 @@
 """plex-audio-offset service.
 
-Serves the phone page, remembers an audio offset per player, and drives the
-running Plex transcoders that the shim prepared.
+Remembers an audio offset per player, drives the running Plex transcoders that
+the shim prepared, and answers an HTTP API. It has no page of its own: an
+interface such as plex-buddy talks to the API.
+
+  GET  /api/state    streams, saved players, limits
+  POST /api/offset   {"session": id | "client": id, "offset_ms": n}
+  POST /api/forget   {"client": id}
+  POST /api/tuning   {"session": id, "on": true|false}
 
 Run with:  python3 -m plex_audio_offset.server
 """
@@ -708,12 +714,10 @@ class Controller:
 
 class Handler(BaseHTTPRequestHandler):
     controller = None
-    web_dir = None
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            with open(os.path.join(self.web_dir, "index.html"), "rb") as f:
-                self.reply(200, f.read(), "text/html; charset=utf-8")
+        if self.path == "/":
+            self.reply_json(200, {"service": "plex-audio-offset", "interface": "plex-buddy"})
         elif self.path == "/api/state":
             self.reply_json(200, self.controller.snapshot())
         else:
@@ -780,7 +784,8 @@ def read_token(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--listen", default="0.0.0.0", help="address to serve on")
+    parser.add_argument("--listen", default="127.0.0.1",
+                        help="address the API listens on; it has no login, so the default is this machine only")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--plex-url", default="http://127.0.0.1:32400")
     parser.add_argument("--plex-prefs", default=PLEX_PREFS,
@@ -811,12 +816,11 @@ def main():
                             args.max_offset_ms, args.lead, args.tuning_seconds, args.wait_ms,
                             args.normal_lead, not args.leave_copied_audio)
     Handler.controller = controller
-    Handler.web_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
     server = Server((args.listen, args.port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: controller.stop.set())
     signal.signal(signal.SIGINT, lambda *_: controller.stop.set())
-    log.info("serving on http://%s:%d", args.listen, args.port)
+    log.info("API on http://%s:%d", args.listen, args.port)
     controller.run()
 
 

@@ -18,7 +18,7 @@ usage() {
     cat <<EOF
 usage: install.sh install|uninstall|status [options]
 
-  --port N          port for the phone page (default $PORT)
+  --port N          port of the API on 127.0.0.1 (default $PORT)
   --plex-home DIR   directory holding "Plex Transcoder" (default $PLEX_HOME)
   --user NAME       user that Plex Media Server runs as (default $SERVICE_USER)
   --python PATH     Python 3 interpreter (default $PYTHON)
@@ -79,9 +79,9 @@ do_install() {
         *[\|\&\\\']*) fail "unsupported character in an option" ;;
     esac
 
-    install -d -m 755 "$PREFIX/plex_audio_offset/web"
+    install -d -m 755 "$PREFIX/plex_audio_offset"
     install -m 644 "$SRC"/plex_audio_offset/*.py "$PREFIX/plex_audio_offset/"
-    install -m 644 "$SRC/plex_audio_offset/web/index.html" "$PREFIX/plex_audio_offset/web/"
+    rm -rf "$PREFIX/plex_audio_offset/web"   # the page of earlier versions; it now lives in plex-buddy
     "$PYTHON" -I "$SHIM" --self-test >/dev/null || fail "the shim does not run under $PYTHON"
 
     render "$SRC/packaging/plex-audio-offset.service.in" > "$UNIT"
@@ -116,7 +116,7 @@ do_install() {
     fi
 
     echo "plex-audio-offset is installed."
-    echo "Open http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT/ on your phone."
+    echo "Its API is at http://127.0.0.1:$PORT/. The page that uses it is plex-buddy."
 }
 
 do_uninstall() {
