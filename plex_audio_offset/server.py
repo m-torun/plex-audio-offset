@@ -634,8 +634,9 @@ class Controller:
                     continue
                 client = self.clients.get(playback.client_id)
                 if not playback.transcode_key:
-                    reason = ("Direct Play: the server sends the file as it is, "
-                              "so there is no audio to shift.")
+                    reason = ("Direct Play: this player reads the file as it is, so there is no "
+                              "audio to shift. To change that, turn off Allow Direct Play in "
+                              "the Plex app's settings on this player, then start playback again.")
                 elif any(marker.get("session") == key for marker in self.wanted):
                     reason = ("Plex did not have the encoder needed to shift this audio. It is "
                               "being fetched; seek or restart playback in a moment to pick it up.")

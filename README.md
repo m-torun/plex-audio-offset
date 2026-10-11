@@ -84,6 +84,9 @@ first frame.
 
 - Plex must be processing the stream. Direct Play, where Plex sends the file
   as it is, cannot be shifted; the page lists such a stream with the reason.
+  The Plex apps for Apple TV, iPhone and iPad play most files this way. Turning
+  off "Allow Direct Play" in such an app's settings makes it ask the server for
+  a processed stream, which can be shifted. Not tested on those devices.
 - Of the audio Plex copies, only AC-3 is handled. Other copied codecs are left
   as they are and cannot be shifted.
 - Copied AC-3 is encoded again for every stream, also at an offset of 0, so
